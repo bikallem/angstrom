@@ -53,7 +53,10 @@ include Parser.Monad
 include Parser.Choice
 
 module Buffered = struct
-  effect Read : int -> (bigstring * int * int * More.t)
+  open EffectHandlers
+  open EffectHandlers.Deep
+
+  type _ eff += Read : int -> (bigstring * int * int * More.t) eff
   let read c = perform (Read c)
 
   type unconsumed = Buffering.unconsumed =
@@ -82,22 +85,28 @@ module Buffered = struct
     if initial_buffer_size < 1 then
       failwith "parse: invalid argument, initial_buffer_size < 1";
     let buffering = Buffering.create initial_buffer_size in
-    match Unbuffered.parse ~read p with
-    | x -> from_unbuffered_state buffering x
-    | effect (Read committed) k ->
-      Buffering.shift buffering committed;
-      let cb input =
-        let more : More.t =
-          match input with
-          | `Eof            -> Complete
-          | #input as input ->
-            Buffering.feed_input buffering input;
-            Incomplete
-        in
-        let for_reading = Buffering.for_reading buffering in
-        continue k (for_reading, 0, Bigstringaf.length for_reading, more)
-      in
-      Partial cb
+    match_with (Unbuffered.parse ~read) p
+    { retc = (fun x -> from_unbuffered_state buffering x);
+      exnc = (fun e -> raise e);
+      effc = (fun (type a) (e: a eff) -> 
+        match e with 
+        | Read committed -> 
+          Some (fun (k : (a, _) continuation) ->  
+            Buffering.shift buffering committed;
+            let cb input =
+              let more : More.t =
+                match input with
+                | `Eof            -> Complete
+                | #input as input ->
+                  Buffering.feed_input buffering input;
+                  Incomplete
+              in
+              let for_reading = Buffering.for_reading buffering in
+              continue k (for_reading, 0, Bigstringaf.length for_reading, more)
+            in
+            Partial cb)
+        | _ -> None);
+    }
 
   let feed state input =
     match state with
